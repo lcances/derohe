@@ -76,7 +76,23 @@ type Account struct {
 	// do not build entire history from 0, only maintain top history
 	TrackRecentBlocks int64 `json:"-"` // only scan top blocks, default is zero, means everything
 
-	sync.Mutex // syncronise modifications to this structure
+	// Event listeners functions registered
+	EventListeners map[rpc.EventType][]func(interface{})
+	sync.Mutex     // syncronise modifications to this structure
+}
+
+func (w *Wallet_Memory) AddListener(event rpc.EventType, callback func(interface{})) {
+	if w.account.EventListeners == nil {
+		w.account.EventListeners = map[rpc.EventType][]func(interface{}){}
+	}
+
+	var listeners []func(interface{})
+	if stored, ok := w.account.EventListeners[event]; ok {
+		listeners = stored
+	}
+
+	listeners = append(listeners, callback)
+	w.account.EventListeners[event] = listeners
 }
 
 func (w *Wallet_Memory) getEncryptedBalanceresult(scid crypto.Hash) rpc.GetEncryptedBalance_Result {
@@ -104,8 +120,6 @@ func (w *Wallet_Memory) InsertReplace(scid crypto.Hash, e rpc.Entry) {
 	var entries []rpc.Entry
 	if _, ok := w.account.EntriesNative[scid]; ok {
 		entries = w.account.EntriesNative[scid]
-	} else {
-
 	}
 
 	i := sort.Search(len(entries), func(j int) bool {
@@ -121,6 +135,13 @@ func (w *Wallet_Memory) InsertReplace(scid crypto.Hash, e rpc.Entry) {
 		// but i is the index where it would be inserted.
 	}
 	entries = append(entries, e)
+
+	// Notify listeners of this new entry
+	if listeners, ok := w.account.EventListeners[rpc.NewEntry]; ok {
+		for _, listener := range listeners {
+			listener(e)
+		}
+	}
 
 	if w.account.EntriesNative == nil {
 		w.account.EntriesNative = map[crypto.Hash][]rpc.Entry{}
@@ -248,33 +269,43 @@ func (w *Wallet_Memory) Show_Transfers(scid crypto.Hash, coinbase bool, in bool,
 
 	var entries []rpc.Entry
 
-	if max_height == 0 {
-		max_height = 5000000000000
-	}
-
 	all_entries := w.account.EntriesNative[scid]
 	if all_entries == nil || len(all_entries) < 1 {
 		return entries
 	}
+
+	filter_by_sender := len(sender) > 0
+	filter_by_receiver := len(receiver) > 0
+
+	// filter all entries based on parameters
 	for _, e := range all_entries {
-		if e.Height >= min_height && e.Height <= max_height {
+		if e.Height >= min_height && (max_height == 0 || e.Height <= max_height) {
+			// sender address
+			if filter_by_sender && e.Sender != sender {
+				continue
+			}
+			// receiver address
+			if filter_by_receiver && e.Destination != receiver {
+				continue
+			}
+			// destination port
+			if dstport != 0 && e.DestinationPort != dstport {
+				continue
+			}
+			// source port
+			if srcport != 0 && e.SourcePort != srcport {
+				continue
+			}
+
 			if coinbase && e.Coinbase {
 				entries = append(entries, e)
-				continue
-			}
-			if in && e.Incoming && !e.Coinbase {
+			} else if out && !(e.Incoming || e.Coinbase) {
 				entries = append(entries, e)
-				continue
-			}
-			if out && !(e.Incoming || e.Coinbase) {
+			} else if in && e.Incoming {
 				entries = append(entries, e)
-				continue
 			}
 		}
 	}
-
-	//we have filtered by coinbase,in,out,min_height,max_height
-	// now we must filter by sernder receiver
 
 	return entries
 
