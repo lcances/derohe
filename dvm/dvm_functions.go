@@ -16,19 +16,17 @@
 
 package dvm
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"go/ast"
-	"strconv"
-	"strings"
+import "fmt"
+import "go/ast"
+import "strconv"
+import "strings"
+import "crypto/sha256"
+import "encoding/hex"
+import "golang.org/x/crypto/sha3"
+import "github.com/blang/semver/v4"
 
-	"github.com/blang/semver/v4"
-	"github.com/deroproject/derohe/cryptography/crypto"
-	"github.com/deroproject/derohe/rpc"
-	"golang.org/x/crypto/sha3"
-)
+import "github.com/deroproject/derohe/rpc"
+import "github.com/deroproject/derohe/cryptography/crypto"
 
 // this files defines  external functions which can be called in DVM
 // for example to load and store data from the blockchain and other basic functions
