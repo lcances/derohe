@@ -1,7 +1,9 @@
 package walletapi
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 
@@ -21,13 +23,152 @@ type GenerateProofFunc func(scid crypto.Hash, scid_index int, s *crypto.Statemen
 
 var GenerateProoffuncptr GenerateProofFunc = crypto.GenerateProof
 
+// Estimate the size of a transaction
+// For privacy and security reasons, we don't estimate the EXACT size in bytes, but the biggest possible size
+// So no data would leak from plain text data (example: RPC Payloads exact size)
+func (w *Wallet_Memory) EstimateBytesSize(transfers_count int, ringsize int, tx_type transaction.TransactionType, scdata rpc.Arguments) int {
+	total_bytes := 0
+	// Transaction Prefix
+	{
+		// Those following are Uvarint, which means they are variable size
+		// But we put full max size to support any future update
+		total_bytes += 8 // Version
+		total_bytes += 8 // Source Network
+		total_bytes += 8 // Destination Network
+		total_bytes += 8 // Transaction Type
+		if tx_type == transaction.PREMINE || tx_type == transaction.SC_TX {
+			total_bytes += transfers_count * 8 // Burn Value
+		}
+
+		if tx_type == transaction.PREMINE || tx_type == transaction.COINBASE || tx_type == transaction.REGISTRATION {
+			total_bytes += 33 // Miner Address
+		}
+
+		if tx_type == transaction.REGISTRATION {
+			total_bytes += 2 * 33 // C, S (fixed size)
+		}
+
+		// This is common header
+		if tx_type == transaction.BURN_TX || tx_type == transaction.NORMAL || tx_type == transaction.SC_TX {
+			total_bytes += 8  // Height
+			total_bytes += 32 // BLID
+			// This one is a varint too (but we put max size)
+			total_bytes += transfers_count * 8 // Number of Assets (uint64)
+		}
+	}
+
+	// Common Payload
+	{
+		total_bytes += transfers_count      // RPC Type
+		total_bytes += transfers_count * 32 // SCID
+
+		// the payload max size
+		total_bytes += transfers_count * transaction.PAYLOAD_LIMIT
+	}
+
+	// Statement
+	statement_size := 0
+	{
+		// Publickeylist pointers max total size
+		// Each public key is a G1 Point compressed to 33 bytes
+		statement_size += ringsize * 33
+
+		// 1 byte for power, 1 byte for bytes per public key
+		statement_size += 2
+
+		// 8 bytes for fees (varint but max value in case)
+		statement_size += 8
+
+		// 33 bytes for D
+		statement_size += 33
+
+		// 33 bytes per C field (bn256.G1 compressed format)
+		statement_size += 33 * ringsize
+
+		// 32 bytes for roothash
+		statement_size += 32
+	}
+	total_bytes += statement_size * transfers_count
+
+	// Proof
+	proof_size := 0
+	{
+		// BA, BS, A, B, u, T_1, T_2
+		proof_size += 7 * 33
+
+		// dynamic sizes
+		m := int(math.Log2(float64(ringsize)))
+		// CLnG, CRnG, C_0G, DG, y_0G, gG, C_XG, y_XG
+		proof_size += 8 * m * 33
+
+		// FieldVector in Proof must be double of CLnG len
+		// which is m
+		// each element in vector is 32 bytes
+		proof_size += m * 2 * 32
+
+		// z_A, that, mu, c, s_sk, s_r, s_b, s_tau
+		proof_size += 8 * 32
+
+		// InnerProduct
+		{
+			// a, b (32 bytes each)
+			proof_size += 2 * 32
+			// bulletproofs are 128 bits, so its 7 elements in ls, rs
+			proof_size += 7 * 2 * 33
+		}
+	}
+	total_bytes += proof_size * transfers_count
+
+	// If its a Smart Contract install, we must count its bytes
+	if tx_type == transaction.SC_TX && scdata.Has(rpc.SCACTION, rpc.DataUint64) {
+		if rpc.SC_INSTALL == rpc.SC_ACTION(scdata.Value(rpc.SCACTION, rpc.DataUint64).(uint64)) {
+			bytes, _ := scdata.MarshalBinary()
+			total_bytes += len(bytes)
+		}
+	}
+
+	return total_bytes
+}
+
+// Estimate fees for a transaction by estimating its size
+func (w *Wallet_Memory) EstimateTxFees(transfers_count int, ringsize int, tx_type transaction.TransactionType, scdata rpc.Arguments) uint64 {
+	total_bytes := w.EstimateBytesSize(transfers_count, ringsize, tx_type, scdata)
+	size_in_kb := total_bytes / 1024
+
+	if (total_bytes % 1024) != 0 { // for any part there of, use a full KB fee
+		size_in_kb += 1
+	}
+
+	return uint64(float64(size_in_kb) * (float64(config.FEE_PER_KB) * float64(w.GetFeeMultiplier())))
+}
+
+// Estimate gas fees by calling the daemon to simulate the TX
+func (w *Wallet_Memory) EstimateGasFees(params rpc.EstimateFees_Params) (uint64, error) {
+	var result rpc.GasEstimate_Result
+	if err := rpc_client.RPC.CallResult(context.Background(), "DERO.GetGasEstimate", params, &result); err != nil {
+		return 0, err
+	}
+
+	return result.GasStorage, nil
+}
+
 // generate proof  etc
-func (w *Wallet_Memory) BuildTransaction(transfers []rpc.Transfer, emap [][][]byte, rings [][]*bn256.G1, block_hash crypto.Hash, height uint64, scdata rpc.Arguments, roothash []byte, max_bits int, fees uint64) *transaction.Transaction {
+// If tx_fees are set to 0, it will be automatically calculated
+// gas_fees must be calculated before calling this function !!
+func (w *Wallet_Memory) BuildTransaction(transfers []rpc.Transfer, emap [][][]byte, rings [][]*bn256.G1, block_hash crypto.Hash, height uint64, scdata rpc.Arguments, roothash []byte, max_bits int, gas_fees uint64, tx_fees uint64) *transaction.Transaction {
 
 	sender := w.account.Keys.Public.G1()
 	sender_secret := w.account.Keys.Secret.BigInt()
 
 	var retry_count int
+
+	// This is used in case we have differents ringsize per transfer
+	highest_ring_size := 0
+	for i := range rings {
+		if len(rings[i]) > highest_ring_size {
+			highest_ring_size = len(rings[i])
+		}
+	}
 
 rebuild_tx:
 
@@ -59,7 +200,10 @@ rebuild_tx:
 		panic("currently we cannot use more than 240 bits")
 	}
 
-	for t, _ := range transfers {
+	for ; max_bits%8 != 0; max_bits++ { // round to next higher byte size
+	}
+
+	for t := range transfers {
 
 		var publickeylist, C, CLn, CRn []*bn256.G1
 		var D bn256.G1
@@ -70,9 +214,6 @@ rebuild_tx:
 		var witness_index []int
 		for i := 0; i < len(rings[t]); i++ { // todocheck whether this is power of 2 or not
 			witness_index = append(witness_index, i)
-		}
-
-		for ; max_bits%8 != 0; max_bits++ { // round to next higher byte size
 		}
 
 		//witness_index[3], witness_index[1] = witness_index[1], witness_index[3]
@@ -138,23 +279,27 @@ rebuild_tx:
 
 		value := transfers[t].Amount
 		burn_value := transfers[t].Burn
-		if fees == 0 && asset.SCID.IsZero() && !fees_done {
-			fees = fees + uint64(len(transfers)+2)*uint64((float64(config.FEE_PER_KB)*float64(float32(len(publickeylist)/16)+w.GetFeeMultiplier())))
-			if data, err := scdata.MarshalBinary(); err != nil {
-				panic(err)
-			} else {
-				fees = fees + (uint64(len(data))*15)/10
-			}
+
+		// If user provide fees, we will use it, otherwise we will calculate it
+		// Fees are only paid on DERO transfers, not on tokens transfers
+		should_do_fees := asset.SCID.IsZero() && !fees_done && tx_fees != 0
+
+		// Compute TX fees only one time, we expect that gas fees are already calculated
+		if tx_fees == 0 && asset.SCID.IsZero() && !fees_done {
+			tx_fees = w.EstimateTxFees(len(transfers), highest_ring_size, tx.TransactionType, scdata)
+			should_do_fees = true
 			fees_done = true
 		}
 
+		fees_in_statement := false
 		for i := range publickeylist { // setup commitments
 			var x bn256.G1
 			switch {
 			case i == witness_index[0]:
-
-				if asset.SCID.IsZero() {
-					x.ScalarMult(crypto.G, new(big.Int).SetInt64(0-int64(value)-int64(fees)-int64(burn_value))) // decrease senders balance
+				if asset.SCID.IsZero() && should_do_fees {
+					x.ScalarMult(crypto.G, new(big.Int).SetInt64(0-int64(value)-int64(tx_fees+gas_fees)-int64(burn_value))) // decrease senders balance (with fees)
+					should_do_fees = false
+					fees_in_statement = true
 				} else {
 					x.ScalarMult(crypto.G, new(big.Int).SetInt64(0-int64(value)-int64(burn_value))) // decrease senders balance
 				}
@@ -223,8 +368,10 @@ rebuild_tx:
 
 		// time for bullets-sigma
 		fees_currentasset := uint64(0)
-		if asset.SCID.IsZero() {
-			fees_currentasset = fees
+		if asset.SCID.IsZero() && fees_in_statement {
+			// fees are only paid on DERO transfers, not on tokens transfers
+			// Those contains gas fees and TX fees
+			fees_currentasset = tx_fees + gas_fees
 		}
 		statement := GenerateStatement(CLn, CRn, publickeylist, C, &D, fees_currentasset) // generate statement
 
@@ -270,7 +417,6 @@ rebuild_tx:
 		//tx.Payloads[t].Proof = crypto.GenerateProof(&tx.Payloads[t].Statement, &witness_list[t], u, tx.GetHash(), tx.Payloads[t].BurnValue)
 
 		tx.Payloads[t].Proof = GenerateProoffuncptr(tx.Payloads[t].SCID, scid_index, &tx.Payloads[t].Statement, &witness_list[t], u, tx.GetHash(), tx.Payloads[t].BurnValue)
-
 	}
 
 	// after the tx is serialized, it loses information which is then fed by blockchain
