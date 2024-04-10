@@ -206,10 +206,27 @@ var sc2 = `/* Minimal smart contract template in DVM-BASIC */
 	End Function
 	`
 
-var codeToAppend = `// This is the code to append
+var codeToAppend1 = `// This is the code to append
 	Function CallRandom() Uint64
 	1  RANDOM()
 	2  RETURN 0
+	End Function
+	`
+
+var codeToAppend2 = `// This is the code to append
+	Function CallRandom2() Uint64
+	1  RANDOM()
+	2  RETURN 0
+	End Function
+	`
+
+var makeImmutable = `// This is the code to append
+	Function UpdateCode(code String) Uint64
+	1  RETURN 0
+	End Function
+
+	Function AppendCode(code String) Uint64
+	1 RETURN 0
 	End Function
 	`
 
@@ -222,7 +239,7 @@ func Test_SC_Changes(t *testing.T) {
 	}
 
 	// Call the AppendCode function
-	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend1}}, addr, 0)
 	if err != nil {
 		t.Fatalf("cannot run contract %s\n", err)
 	}
@@ -244,21 +261,27 @@ func Test_SC_Changes(t *testing.T) {
 		t.Fatalf("cannot run contract %s\n", err)
 	}
 
-	// Call the Update function on code to append (remove Initialize, UpdateCode, AppendCode)
-	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	// Make the SC immutable
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, makeImmutable}}, addr, 0)
 	if err != nil {
 		t.Fatalf("cannot run contract %s\n", err)
 	}
 
-	// Calling UpdateCode, AppendCode should fail
-	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
-	if err == nil {
-		t.Fatalf("UpdateCode should have failed")
+	// Running AppendCode should not change the SC code
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend2}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
 	}
 
-	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
-	if err == nil {
-		t.Fatalf("AppendCode should have failed")
+	// Check the new code to see if the function CallRandom2 exists (should fail)
+	w_sc_data_tree = Wrapped_tree(s.cache, s.ss, scid)
+	sc_bytes, err = w_sc_data_tree.Get(SC_Code_Key(scid))
+	if err != nil {
+		t.Fatalf("cannot read code from SC %s\n", err)
+	}
+	// compare the code
+	if strings.Contains(string(sc_bytes), "Function CallRandom2() Uint64") {
+		t.Fatalf("AppendCode should not append the code after the SC is made immutable\n")
 	}
 
 	_ = gascompute
