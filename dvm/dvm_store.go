@@ -134,6 +134,24 @@ func (tx_store *TX_Storage) Store(dkey DataKey, v Variable) {
 	tx_store.RawKeys[string(kbytes)] = vbytes
 }
 
+// Append data to a variables
+func (tx_store *TX_Storage) Append(dkey DataKey, v Variable) {
+	//fmt.Printf("Append request %+v   : %+v\n", dkey, v)
+
+	kbytes := dkey.MarshalBinaryPanic()
+	vbytes := v.MarshalBinaryPanic()
+	tx_store.State.ConsumeStorageGas(int64(len(vbytes)) * 1)
+
+	// Using RawLoad to not consume gas from loading current stored value
+	value, found := tx_store.RawLoad(kbytes)
+	if found {
+		// remove the last byte from value since it marks the end of the SC
+		vbytes = append(value[:len(value)-1], vbytes...)
+	}
+
+	tx_store.RawKeys[string(kbytes)] = vbytes
+}
+
 // store variable
 func (tx_store *TX_Storage) SendExternal(sender_scid, asset crypto.Hash, addr_str string, amount uint64) {
 	//fmt.Printf("Transfer to  external address   : %+v\n", addr_str)
