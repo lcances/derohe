@@ -182,3 +182,85 @@ func Test_Simulator_execution(t *testing.T) {
 	_ = gascompute
 	_ = gasstorage
 }
+
+var sc2 = `/* Minimal smart contract template in DVM-BASIC */
+	Function Initialize() Uint64
+	1 IF EXISTS("owner") THEN GOTO 10
+	2 STORE("owner", SIGNER())
+	3 STORE("original_owner", SIGNER())
+	10 RETURN 0
+	End Function
+
+	Function UpdateCode(code String) Uint64
+	1  IF LOAD("owner") == SIGNER() THEN GOTO 3
+	2  RETURN 1
+	3  UPDATE_SC_CODE(code)
+	4  RETURN 0
+	End Function
+
+	Function AppendCode(code String) Uint64
+	1  IF LOAD("owner") == SIGNER() THEN GOTO 3
+	2  RETURN 1
+	3  APPEND_SC_CODE(code)
+	4  RETURN 0
+	End Function
+	`
+
+var codeToAppend = `// This is the code to append
+	Function CallRandom() Uint64
+	1  RANDOM()
+	2  RETURN 0
+	End Function
+	`
+
+func Test_SC_Changes(t *testing.T) {
+	s, addr, scid, gascompute, gasstorage, err := initializeTest(sc2)
+	// var zerohash crypto.Hash
+
+	if err != nil {
+		t.Fatalf("cannot initialize test %s\n", err)
+	}
+
+	// Call the AppendCode function
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
+	}
+
+	// Check the new code to see if the function CallRandom exists
+	w_sc_data_tree := Wrapped_tree(s.cache, s.ss, scid)
+	sc_bytes, err := w_sc_data_tree.Get(SC_Code_Key(scid))
+	if err != nil {
+		t.Fatalf("cannot read code from SC %s\n", err)
+	}
+	// compare the code
+	if !strings.Contains(string(sc_bytes), "Function CallRandom() Uint64") {
+		t.Fatalf("AppendCode did not append the code correctly\n")
+	}
+
+	// Call the newly added function CallRandom
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "CallRandom"}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
+	}
+
+	// Call the Update function on code to append (remove Initialize, UpdateCode, AppendCode)
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
+	}
+
+	// Calling UpdateCode, AppendCode should fail
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err == nil {
+		t.Fatalf("UpdateCode should have failed")
+	}
+
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err == nil {
+		t.Fatalf("AppendCode should have failed")
+	}
+
+	_ = gascompute
+	_ = gasstorage
+}
