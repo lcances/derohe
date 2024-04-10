@@ -329,9 +329,10 @@ func dvm_append_sc_code(dvm *DVM_Interpreter, expr *ast.CallExpr) (handled bool,
 	code_eval := dvm.eval(expr.Args[0])
 	switch k := code_eval.(type) {
 	case string:
-		var found uint64
-		var origal_code = dvm.State.Store.Load(DataKey{Key: Variable{Type: String, ValueString: "C"}}, &found)
-		dvm.State.Store.Store(DataKey{Key: Variable{Type: String, ValueString: "C"}}, Variable{Type: String, ValueString: origal_code.ValueString + k}) // TODO verify code authenticity how
+		dvm.State.Store.Append(
+			DataKey{Key: Variable{Type: String, ValueString: "C"}},
+			Variable{Type: String, ValueString: k}) // TODO verify code authenticity how
+
 		return true, uint64(1)
 	default:
 		return true, uint64(0)
