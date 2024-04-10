@@ -116,25 +116,33 @@ This lottery smart contract will give lottery wins on every second try in follow
 	`
 
 // run the test
-func Test_Simulator_execution(t *testing.T) {
+func initializeTest(code string) (*Simulator, *rpc.Address, crypto.Hash, uint64, uint64, error) {
 	s := SimulatorInitialize(nil)
 	var addr *rpc.Address
 	var err error
-
-	if addr, err = rpc.NewAddress(strings.TrimSpace("deto1qy0ehnqjpr0wxqnknyc66du2fsxyktppkr8m8e6jvplp954klfjz2qqdzcd8p")); err != nil {
-		panic(err)
-	}
-
 	var zerohash crypto.Hash
 
+	if addr, err = rpc.NewAddress(strings.TrimSpace("deto1qy0ehnqjpr0wxqnknyc66du2fsxyktppkr8m8e6jvplp954klfjz2qqdzcd8p")); err != nil {
+		return nil, nil, crypto.Hash{}, 0, 0, err
+	}
+
 	s.AccountAddBalance(*addr, zerohash, 500)
-	scid, gascompute, gasstorage, err := s.SCInstall(sc, map[crypto.Hash]uint64{}, rpc.Arguments{}, addr, 0)
+	scid, gascompute, gasstorage, err := s.SCInstall(code, map[crypto.Hash]uint64{}, rpc.Arguments{}, addr, 0)
 
 	if err != nil {
-		t.Fatalf("cannot install contract %s\n", err)
+		return nil, nil, crypto.Hash{}, 0, 0, err
 	}
-	_ = gascompute
-	_ = gasstorage
+
+	return s, addr, scid, gascompute, gasstorage, nil
+}
+
+func Test_Simulator_execution(t *testing.T) {
+	s, addr, scid, gascompute, gasstorage, err := initializeTest(sc)
+	var zerohash crypto.Hash
+
+	if err != nil {
+		t.Fatalf("cannot initialize test %s\n", err)
+	}
 
 	// trigger first time lottery play
 	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{zerohash: 45}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "Lottery"}}, addr, 0)
@@ -171,4 +179,6 @@ func Test_Simulator_execution(t *testing.T) {
 		t.Fatalf("storage corruption")
 	}
 
+	_ = gascompute
+	_ = gasstorage
 }
