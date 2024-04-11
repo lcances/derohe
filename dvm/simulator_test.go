@@ -116,25 +116,33 @@ This lottery smart contract will give lottery wins on every second try in follow
 	`
 
 // run the test
-func Test_Simulator_execution(t *testing.T) {
+func initializeTest(code string) (*Simulator, *rpc.Address, crypto.Hash, uint64, uint64, error) {
 	s := SimulatorInitialize(nil)
 	var addr *rpc.Address
 	var err error
-
-	if addr, err = rpc.NewAddress(strings.TrimSpace("deto1qy0ehnqjpr0wxqnknyc66du2fsxyktppkr8m8e6jvplp954klfjz2qqdzcd8p")); err != nil {
-		panic(err)
-	}
-
 	var zerohash crypto.Hash
 
+	if addr, err = rpc.NewAddress(strings.TrimSpace("deto1qy0ehnqjpr0wxqnknyc66du2fsxyktppkr8m8e6jvplp954klfjz2qqdzcd8p")); err != nil {
+		return nil, nil, crypto.Hash{}, 0, 0, err
+	}
+
 	s.AccountAddBalance(*addr, zerohash, 500)
-	scid, gascompute, gasstorage, err := s.SCInstall(sc, map[crypto.Hash]uint64{}, rpc.Arguments{}, addr, 0)
+	scid, gascompute, gasstorage, err := s.SCInstall(code, map[crypto.Hash]uint64{}, rpc.Arguments{}, addr, 0)
 
 	if err != nil {
-		t.Fatalf("cannot install contract %s\n", err)
+		return nil, nil, crypto.Hash{}, 0, 0, err
 	}
-	_ = gascompute
-	_ = gasstorage
+
+	return s, addr, scid, gascompute, gasstorage, nil
+}
+
+func Test_Simulator_execution(t *testing.T) {
+	s, addr, scid, gascompute, gasstorage, err := initializeTest(sc)
+	var zerohash crypto.Hash
+
+	if err != nil {
+		t.Fatalf("cannot initialize test %s\n", err)
+	}
 
 	// trigger first time lottery play
 	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{zerohash: 45}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "Lottery"}}, addr, 0)
@@ -171,4 +179,88 @@ func Test_Simulator_execution(t *testing.T) {
 		t.Fatalf("storage corruption")
 	}
 
+	_ = gascompute
+	_ = gasstorage
+}
+
+var sc2 = `/* Minimal smart contract template in DVM-BASIC */
+	Function Initialize() Uint64
+	1 IF EXISTS("owner") THEN GOTO 10
+	2 STORE("owner", SIGNER())
+	3 STORE("original_owner", SIGNER())
+	10 RETURN 0
+	End Function
+
+	Function UpdateCode(code String) Uint64
+	1  IF LOAD("owner") == SIGNER() THEN GOTO 3
+	2  RETURN 1
+	3  UPDATE_SC_CODE(code)
+	4  RETURN 0
+	End Function
+
+	Function AppendCode(code String) Uint64
+	1  IF LOAD("owner") == SIGNER() THEN GOTO 3
+	2  RETURN 1
+	3  APPEND_SC_CODE(code)
+	4  RETURN 0
+	End Function
+	`
+
+var codeToAppend = `// This is the code to append
+	Function CallRandom() Uint64
+	1  RANDOM()
+	2  RETURN 0
+	End Function
+	`
+
+func Test_SC_Changes(t *testing.T) {
+	s, addr, scid, gascompute, gasstorage, err := initializeTest(sc2)
+	// var zerohash crypto.Hash
+
+	if err != nil {
+		t.Fatalf("cannot initialize test %s\n", err)
+	}
+
+	// Call the AppendCode function
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
+	}
+
+	// Check the new code to see if the function CallRandom exists
+	w_sc_data_tree := Wrapped_tree(s.cache, s.ss, scid)
+	sc_bytes, err := w_sc_data_tree.Get(SC_Code_Key(scid))
+	if err != nil {
+		t.Fatalf("cannot read code from SC %s\n", err)
+	}
+	// compare the code
+	if !strings.Contains(string(sc_bytes), "Function CallRandom() Uint64") {
+		t.Fatalf("AppendCode did not append the code correctly\n")
+	}
+
+	// Call the newly added function CallRandom
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "CallRandom"}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
+	}
+
+	// Call the Update function on code to append (remove Initialize, UpdateCode, AppendCode)
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err != nil {
+		t.Fatalf("cannot run contract %s\n", err)
+	}
+
+	// Calling UpdateCode, AppendCode should fail
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "UpdateCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err == nil {
+		t.Fatalf("UpdateCode should have failed")
+	}
+
+	gascompute, gasstorage, err = s.RunSC(map[crypto.Hash]uint64{}, rpc.Arguments{{rpc.SCACTION, rpc.DataUint64, uint64(rpc.SC_CALL)}, {rpc.SCID, rpc.DataHash, scid}, rpc.Argument{"entrypoint", rpc.DataString, "AppendCode"}, rpc.Argument{"code", rpc.DataString, codeToAppend}}, addr, 0)
+	if err == nil {
+		t.Fatalf("AppendCode should have failed")
+	}
+
+	_ = gascompute
+	_ = gasstorage
 }

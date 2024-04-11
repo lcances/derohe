@@ -73,6 +73,7 @@ func init() {
 	func_table["block_timestamp"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 2500, StorageCost: 0, PtrU: dvm_block_timestamp}}
 	func_table["signer"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 5000, StorageCost: 0, PtrS: dvm_signer}}
 	func_table["update_sc_code"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 5000, StorageCost: 0, PtrU: dvm_update_sc_code}}
+	func_table["append_sc_code"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 5000, StorageCost: 0, PtrU: dvm_append_sc_code}}
 	func_table["is_address_valid"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 50000, StorageCost: 0, PtrU: dvm_is_address_valid}}
 	func_table["address_raw"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 60000, StorageCost: 0, PtrS: dvm_address_raw}}
 	func_table["address_string"] = []func_data{func_data{Range: semver.MustParseRange(">=0.0.0"), ComputeCost: 50000, StorageCost: 0, PtrS: dvm_address_string}}
@@ -315,6 +316,20 @@ func dvm_update_sc_code(dvm *DVM_Interpreter, expr *ast.CallExpr) (handled bool,
 	switch k := code_eval.(type) {
 	case string:
 		dvm.State.Store.Store(DataKey{Key: Variable{Type: String, ValueString: "C"}}, Variable{Type: String, ValueString: k}) // TODO verify code authenticity how
+		return true, uint64(1)
+	default:
+		return true, uint64(0)
+	}
+}
+
+func dvm_append_sc_code(dvm *DVM_Interpreter, expr *ast.CallExpr) (handled bool, result uint64) {
+	checkargscount(1, len(expr.Args)) // check number of arguments
+	code_eval := dvm.eval(expr.Args[0])
+	switch k := code_eval.(type) {
+	case string:
+		var found uint64
+		var origal_code = dvm.State.Store.Load(DataKey{Key: Variable{Type: String, ValueString: "C"}}, &found)
+		dvm.State.Store.Store(DataKey{Key: Variable{Type: String, ValueString: "C"}}, Variable{Type: String, ValueString: origal_code.ValueString + k}) // TODO verify code authenticity how
 		return true, uint64(1)
 	default:
 		return true, uint64(0)
